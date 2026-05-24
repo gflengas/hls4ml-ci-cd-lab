@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>hls4ml FPGA Model Comparison Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        slate: {
+                            850: "#152033",
+                            900: "#0f172a",
+                        }
+                    }
+                }
+            }
+        };
+    </script>
+    <style>
+        body { font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+        .table-container { max-height: 600px; overflow-y: auto; }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-200 min-h-screen p-4 md:p-8">
+    <div class="max-w-7xl mx-auto space-y-6">
+        <div class="bg-slate-800 rounded-xl p-6 shadow-lg border border-slate-700">
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-2 gap-4">
+                <div class="flex items-center gap-4">
+                    <img
+                        src="https://fastmachinelearning.org/hls4ml/_images/hls4ml_logo.png"
+                        alt="hls4ml Logo"
+                        class="h-12 w-auto object-contain"
+                        onerror="this.style.display='none'; document.getElementById('fallback-icon').classList.remove('hidden')"
+                    >
+                    <i id="fallback-icon" class="fa-solid fa-microchip text-blue-500 text-4xl hidden"></i>
+                    <div>
+                        <h1 class="text-3xl font-bold text-white tracking-tight">Model Comparison Dashboard</h1>
+                        <p class="text-slate-400 mt-1 text-sm text-blue-400 font-semibold">Hardware-in-the-Loop Performance Data &mdash; Vitis Unified Backend</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6" id="kpiContainer"></div>
+
+        <div class="bg-slate-800 rounded-xl p-2 shadow-lg border border-slate-700 inline-flex gap-2">
+            <button id="metricsTabButton" class="tab-button px-4 py-2 rounded-lg text-sm font-semibold bg-blue-600 text-white" onclick="setActiveTab('metrics')">Run Metrics</button>
+            <button id="modelsTabButton" class="tab-button px-4 py-2 rounded-lg text-sm font-semibold text-slate-300 hover:bg-slate-700" onclick="setActiveTab('models')">Model Cards</button>
+        </div>
+
+        <div id="metricsTab" class="space-y-6">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div class="bg-slate-800 rounded-xl p-6 shadow-lg border border-slate-700">
+                    <h2 class="text-xl font-semibold mb-4 text-white">Projected Latency (ns)</h2>
+                    <div class="relative h-64"><canvas id="latencyChart"></canvas></div>
+                </div>
+                <div class="bg-slate-800 rounded-xl p-6 shadow-lg border border-slate-700">
+                    <h2 class="text-xl font-semibold mb-4 text-white">HIL Throughput (inferences/s)</h2>
+                    <div class="relative h-64"><canvas id="throughputChart"></canvas></div>
+                </div>
+                <div class="bg-slate-800 rounded-xl p-6 shadow-lg border border-slate-700">
+                    <h2 class="text-xl font-semibold mb-4 text-white">Resource Utilization</h2>
+                    <div class="relative h-64"><canvas id="resourceChart"></canvas></div>
+                </div>
+                <div class="bg-slate-800 rounded-xl p-6 shadow-lg border border-slate-700">
+                    <h2 class="text-xl font-semibold mb-4 text-white">Power Breakdown (W)</h2>
+                    <div class="relative h-64"><canvas id="powerChart"></canvas></div>
+                </div>
+                <div class="bg-slate-800 rounded-xl p-6 shadow-lg border border-slate-700 lg:col-span-2">
+                    <h2 class="text-xl font-semibold mb-4 text-white text-center">Pixel Throughput vs Energy Efficiency</h2>
+                    <div class="relative h-80"><canvas id="efficiencyChart"></canvas></div>
+                </div>
+            </div>
+
+            <div class="bg-slate-800 rounded-xl p-6 shadow-lg border border-slate-700 overflow-hidden">
+                <div class="flex items-center justify-between mb-4 px-2">
+                    <h2 class="text-xl font-semibold text-white">Detailed Run Comparison</h2>
+                </div>
+                <div class="overflow-x-auto table-container border border-slate-700 rounded-lg shadow-inner">
+                    <table class="w-full text-[11px] text-left text-slate-300">
+                        <thead id="tableHead" class="text-slate-400 uppercase bg-slate-900 sticky top-0 z-10 border-b-2 border-slate-700"></thead>
+                        <tbody id="dataTableBody" class="divide-y divide-slate-700"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div id="modelsTab" class="hidden">
+            <div id="modelCardContainer" class="grid grid-cols-1 xl:grid-cols-2 gap-6"></div>
+        </div>
+    </div>
+
+    <script>
+        const initialData = __MODEL_JSON__;
+        const charts = {};
+        const palette = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"];
+        const tableState = {
+            rows: [],
+            orderedKeys: [],
+            sortKey: null,
+            sortDir: "asc"
+        };
+
+        const safeFloat = (v) => (v === "N/A" || v === undefined || v === null) ? null : parseFloat(v);
+        const parseUs = (v) => v && typeof v === "string" && v.includes("us") ? parseFloat(v.split(" ")[0]) : null;
+        const escapeHtml = (value) => String(value ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+        const formatCompact = (value) => {
+            if (value === null || value === undefined || Number.isNaN(value)) return "N/A";
+            return Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 2 }).format(value);
+        };
+        const formatShape = (shape) => {
+            if (Array.isArray(shape) && shape.some(Array.isArray)) return shape.map(formatShape).join(" | ");
+            if (Array.isArray(shape)) return shape.map((v, i) => v === null ? (i === 0 ? "N" : "?") : v).join(" x ");
+            return shape || "N/A";
+        };
+        const pixelsFromShape = (shape) => {
+            if (!Array.isArray(shape)) return null;
+            const dims = shape.filter(v => Number.isFinite(v) && v > 0);
+            if (!dims.length) return null;
+            return dims.reduce((acc, value) => acc * value, 1);
+        };
+
+        function renderChart(id, type, data, options = {}) {
+            if (charts[id]) charts[id].destroy();
+            const ctx = document.getElementById(id).getContext("2d");
+            charts[id] = new Chart(ctx, {
+                type,
+                data,
+                options: { responsive: true, maintainAspectRatio: false, ...options }
+            });
+        }
+
+        function setActiveTab(tab) {
+            const isMetrics = tab === "metrics";
+            document.getElementById("metricsTab").classList.toggle("hidden", !isMetrics);
+            document.getElementById("modelsTab").classList.toggle("hidden", isMetrics);
+            document.getElementById("metricsTabButton").className = isMetrics
+                ? "tab-button px-4 py-2 rounded-lg text-sm font-semibold bg-blue-600 text-white"
+                : "tab-button px-4 py-2 rounded-lg text-sm font-semibold text-slate-300 hover:bg-slate-700";
+            document.getElementById("modelsTabButton").className = !isMetrics
+                ? "tab-button px-4 py-2 rounded-lg text-sm font-semibold bg-blue-600 text-white"
+                : "tab-button px-4 py-2 rounded-lg text-sm font-semibold text-slate-300 hover:bg-slate-700";
+        }
+
+        function populateKPIs(data) {
+            const withThr = data.filter(d => d.sampleThr !== null);
+            const withEff = data.filter(d => d.pixelEff !== null);
+            const withHlsLat = data.filter(d => d.latUs !== null);
+            const withDynPower = data
+                .map(d => ({ ...d, dynPwr: safeFloat(d.power_dynamic_w) }))
+                .filter(d => d.dynPwr !== null);
+
+            const highestThr = withThr.length ? withThr.reduce((a, b) => a.sampleThr > b.sampleThr ? a : b) : null;
+            const bestEff = withEff.length ? withEff.reduce((a, b) => a.pixelEff > b.pixelEff ? a : b) : null;
+            const lowestLat = withHlsLat.length ? withHlsLat.reduce((a, b) => a.latUs < b.latUs ? a : b) : null;
+            const lowestDynPower = withDynPower.length ? withDynPower.reduce((a, b) => a.dynPwr < b.dynPwr ? a : b) : null;
+            const winnerLabel = (row) => row ? row.model.replace(/_/g, " ") : "N/A";
+
+            const kpis = [
+                {
+                    title: "Best HIL Throughput",
+                    value: highestThr ? `${formatCompact(highestThr.sampleThr)} inf/s` : "N/A",
+                    winner: winnerLabel(highestThr),
+                    icon: "fa-gauge-high",
+                    color: "text-blue-400"
+                },
+                {
+                    title: "Energy Efficiency",
+                    value: bestEff ? `${formatCompact(bestEff.pixelEff)} px/s/W` : "N/A",
+                    winner: winnerLabel(bestEff),
+                    icon: "fa-leaf",
+                    color: "text-emerald-400"
+                },
+                {
+                    title: "Lowest Latency (HLS)",
+                    value: lowestLat ? `${lowestLat.latUs.toFixed(3)} us` : "N/A",
+                    winner: winnerLabel(lowestLat),
+                    icon: "fa-stopwatch",
+                    color: "text-yellow-400"
+                },
+                {
+                    title: "Lowest Dynamic Power",
+                    value: lowestDynPower ? `${lowestDynPower.dynPwr.toFixed(3)} W` : "N/A",
+                    winner: winnerLabel(lowestDynPower),
+                    icon: "fa-bolt",
+                    color: "text-rose-400"
+                }
+            ];
+
+            document.getElementById("kpiContainer").innerHTML = kpis.map(k => `
+                <div class="bg-slate-800 rounded-xl p-5 border border-slate-700 flex items-center gap-4 transition-transform hover:scale-105">
+                    <div class="bg-slate-900 p-3 rounded-lg"><i class="fa-solid ${k.icon} text-xl ${k.color}"></i></div>
+                    <div>
+                        <p class="text-[10px] text-slate-500 uppercase font-bold tracking-wider">${k.title}</p>
+                        <p class="text-xl font-bold text-white">${k.value}</p>
+                        <p class="text-[11px] text-slate-400 mt-1">${k.winner}</p>
+                    </div>
+                </div>
+            `).join("");
+        }
+
+        function populateGroupedTable(data) {
+            const metaKeys = ["model"];
+            const hilKeys = ["hil_sample_throughput", "hil_pixel_throughput", "hil_latency", "hil_error_mae", "hil_error_mse"];
+            const resourceKeys = ["impl_lut", "impl_bram36", "impl_bram18", "impl_uram", "impl_ff", "impl_dsp"];
+            const timingKeys = ["wns_ns", "clk_period_ns", "clk_freq_mhz", "hls_ii_min", "hls_ii_max", "hls_latency_min_us", "hls_latency_avg_us", "hls_latency_max_us"];
+            const powerKeys = ["power_total_w", "power_dynamic_w", "power_static_w"];
+
+            const orderedKeys = [...metaKeys, ...hilKeys, ...resourceKeys, ...timingKeys, ...powerKeys];
+            tableState.rows = data.slice();
+            tableState.orderedKeys = orderedKeys;
+
+            if (!tableState.sortKey) {
+                tableState.sortKey = "model";
+                tableState.sortDir = "asc";
+            }
+
+            const headRow = `<tr>${orderedKeys.map((key) => {
+                let colorClass = "text-slate-400";
+                if (hilKeys.includes(key)) colorClass = "text-blue-400 bg-blue-900/10";
+                if (resourceKeys.includes(key)) colorClass = "text-emerald-400 bg-emerald-900/10";
+                if (timingKeys.includes(key)) colorClass = "text-yellow-400 bg-yellow-900/10";
+                if (powerKeys.includes(key)) colorClass = "text-rose-400 bg-rose-900/10";
+                const isActive = tableState.sortKey === key;
+                const arrow = isActive ? (tableState.sortDir === "asc" ? "▲" : "▼") : "";
+                return `<th class="px-4 py-3 border-b border-slate-700 whitespace-nowrap ${colorClass}">
+                    <button class="w-full text-left font-semibold" onclick="sortTableBy('${key}')">
+                        ${key.replace(/_/g, " ")} <span class="text-[10px]">${arrow}</span>
+                    </button>
+                </th>`;
+            }).join("")}</tr>`;
+
+            document.getElementById("tableHead").innerHTML = headRow;
+            renderTableBody();
+        }
+
+        function renderTableBody() {
+            const orderedKeys = tableState.orderedKeys;
+            const bodyHtml = tableState.rows.map((row) => {
+                const cells = orderedKeys.map((key) => {
+                    let val = row[key];
+                    if (val === undefined || val === null || val === "N/A") {
+                        return `<td class="px-4 py-2 text-slate-600 italic">N/A</td>`;
+                    }
+                    if (typeof val === "number") {
+                        val = (val % 1 === 0) ? val.toLocaleString() : val.toFixed(4);
+                    } else if (Array.isArray(val)) {
+                        val = formatShape(val);
+                    } else if (typeof val === "object") {
+                        val = JSON.stringify(val);
+                    }
+                    let cellClass = "";
+                    if (key === "model") cellClass = "font-mono text-xs text-slate-400";
+                    if (key === "hil_sample_throughput" || key === "hil_pixel_throughput") cellClass = "font-bold text-white";
+                    return `<td class="px-4 py-2 border-b border-slate-700/50 ${cellClass}">${val}</td>`;
+                }).join("");
+                return `<tr class="hover:bg-slate-850 transition-colors">${cells}</tr>`;
+            }).join("");
+
+            document.getElementById("dataTableBody").innerHTML = bodyHtml;
+        }
+
+        function sortValue(raw) {
+            if (raw === undefined || raw === null || raw === "N/A") return null;
+            if (typeof raw === "number") return raw;
+            if (typeof raw === "string") {
+                const numeric = parseFloat(raw);
+                if (!Number.isNaN(numeric) && /^-?\d+(\.\d+)?(\s*[a-zA-Z%/]+)?$/.test(raw.trim())) {
+                    return numeric;
+                }
+                return raw.toLowerCase();
+            }
+            return String(raw).toLowerCase();
+        }
+
+        function sortTableBy(key) {
+            if (tableState.sortKey === key) {
+                tableState.sortDir = tableState.sortDir === "asc" ? "desc" : "asc";
+            } else {
+                tableState.sortKey = key;
+                tableState.sortDir = "asc";
+            }
+
+            const dir = tableState.sortDir === "asc" ? 1 : -1;
+            tableState.rows.sort((a, b) => {
+                const va = sortValue(a[key]);
+                const vb = sortValue(b[key]);
+
+                if (va === null && vb === null) return 0;
+                if (va === null) return 1;
+                if (vb === null) return -1;
+
+                if (typeof va === "number" && typeof vb === "number") {
+                    return (va - vb) * dir;
+                }
+                return String(va).localeCompare(String(vb)) * dir;
+            });
+
+            populateGroupedTable(tableState.rows);
+        }
+
+        function renderModelCards(data) {
+            const cards = data.map((model) => {
+                const layers = Array.isArray(model.model_layers) ? model.model_layers : [];
+                const layerRows = layers.length ? layers.map((layer) => {
+                    const quantizers = layer.quantizers && Object.keys(layer.quantizers).length
+                        ? Object.values(layer.quantizers).map(escapeHtml).join(", ")
+                        : "-";
+                    return `<tr class="border-b border-slate-700/60">
+                        <td class="px-3 py-2 font-mono text-slate-300">${escapeHtml(layer.name)}</td>
+                        <td class="px-3 py-2 text-blue-300">${escapeHtml(layer.class_name)}</td>
+                        <td class="px-3 py-2">${escapeHtml(formatShape(layer.output_shape))}</td>
+                        <td class="px-3 py-2 text-right">${Number(layer.params || 0).toLocaleString()}</td>
+                        <td class="px-3 py-2 text-slate-400">${quantizers}</td>
+                    </tr>`;
+                }).join("") : `<tr><td class="px-3 py-4 text-slate-500 italic" colspan="5">No layer metadata available for this run.</td></tr>`;
+
+                const summary = model.model_summary ? `<details class="mt-4 group">
+                    <summary class="cursor-pointer text-sm text-blue-300 hover:text-blue-200">Show Keras summary</summary>
+                    <pre class="mt-3 max-h-80 overflow-auto rounded-lg bg-slate-950 p-4 text-[11px] text-slate-300 border border-slate-700">${escapeHtml(model.model_summary)}</pre>
+                </details>` : "";
+
+                return `<article class="bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden">
+                    <div class="p-5 border-b border-slate-700 bg-slate-850/60">
+                        <div class="flex items-start justify-between gap-4">
+                            <div>
+                                <h2 class="text-xl font-bold text-white">${escapeHtml(model.model.replace(/_/g, " "))}</h2>
+                                <p class="text-xs text-slate-500 font-mono mt-1">${escapeHtml(model.model_file || model.model_name || model.model)}</p>
+                            </div>
+                            <div class="text-right">
+                                <span class="rounded-full bg-blue-500/10 px-3 py-1 text-xs font-semibold text-blue-300">${formatCompact(safeFloat(model.model_params))} params</span>
+                                ${safeFloat(model.model_test_accuracy) !== null ? `<p class="mt-2 text-xs font-semibold text-emerald-300">${(safeFloat(model.model_test_accuracy) * 100).toFixed(1)}% accuracy</p>` : ""}
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4 text-sm">
+                            <div class="rounded-lg bg-slate-900 p-3 border border-slate-700">
+                                <p class="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Input</p>
+                                <p class="mt-1 font-mono text-slate-200">${escapeHtml(formatShape(model.model_input_shape))}</p>
+                            </div>
+                            <div class="rounded-lg bg-slate-900 p-3 border border-slate-700">
+                                <p class="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Output</p>
+                                <p class="mt-1 font-mono text-slate-200">${escapeHtml(formatShape(model.model_output_shape))}</p>
+                            </div>
+                            <div class="rounded-lg bg-slate-900 p-3 border border-slate-700">
+                                <p class="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Layers</p>
+                                <p class="mt-1 font-mono text-slate-200">${escapeHtml(model.model_layer_count || layers.length || "N/A")}</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="p-5">
+                        <div class="overflow-x-auto border border-slate-700 rounded-lg">
+                            <table class="w-full text-[11px] text-left text-slate-300">
+                                <thead class="text-slate-400 uppercase bg-slate-900">
+                                    <tr>
+                                        <th class="px-3 py-2">Layer</th>
+                                        <th class="px-3 py-2">Type</th>
+                                        <th class="px-3 py-2">Output Shape</th>
+                                        <th class="px-3 py-2 text-right">Params</th>
+                                        <th class="px-3 py-2">Quantizers</th>
+                                    </tr>
+                                </thead>
+                                <tbody>${layerRows}</tbody>
+                            </table>
+                        </div>
+                        ${summary}
+                    </div>
+                </article>`;
+            }).join("");
+
+            document.getElementById("modelCardContainer").innerHTML = cards || `<div class="bg-slate-800 rounded-xl p-6 border border-slate-700 text-slate-400">No model data available.</div>`;
+        }
+
+        function renderDashboard(data) {
+            const labels = data.map(d => d.model.replace(/_/g, " "));
+            const processed = data.map((d) => {
+                const latUs = parseUs(d.hls_latency_avg_us);
+                const pwr = safeFloat(d.power_total_w);
+                const sampleThr = safeFloat(d.hil_sample_throughput) ?? safeFloat(d.hil_throughput);
+                const inferredPixels = pixelsFromShape(d.model_input_shape);
+                const pixelsPerSample = safeFloat(d.hil_pixels_per_sample) ?? inferredPixels;
+                const pixelThr = safeFloat(d.hil_pixel_throughput) ?? ((sampleThr && pixelsPerSample) ? sampleThr * pixelsPerSample : null);
+                const pixelEff = (pixelThr && pwr) ? (pixelThr / pwr) : null;
+                const totalBram = parseInt(d.impl_bram18 || 0, 10) + parseInt(d.impl_bram36 || 0, 10);
+                return { ...d, sampleThr, pixelsPerSample, pixelThr, pixelEff, latUs, totalBram, pwr };
+            });
+
+            Chart.defaults.color = "#94a3b8";
+            Chart.defaults.borderColor = "#334155";
+
+            renderChart("latencyChart", "bar", {
+                labels,
+                datasets: [{
+                    label: "Latency (ns)",
+                    data: processed.map(d => d.latUs ? d.latUs * 1000 : null),
+                    backgroundColor: palette
+                }]
+            }, {
+                plugins: { legend: { display: false } },
+                scales: { y: { type: "logarithmic" } }
+            });
+
+            renderChart("throughputChart", "bar", {
+                labels,
+                datasets: [{
+                    label: "HIL inferences/s",
+                    data: processed.map(d => d.sampleThr),
+                    backgroundColor: palette
+                }]
+            }, {
+                plugins: { legend: { display: false } },
+                scales: { y: { type: "logarithmic" } }
+            });
+
+            renderChart("resourceChart", "bar", {
+                labels: ["LUT", "FF", "BRAM", "DSP"],
+                datasets: processed.map((d, i) => ({
+                    label: labels[i],
+                    data: [
+                        parseInt(d.impl_lut || 0, 10),
+                        parseInt(d.impl_ff || 0, 10),
+                        d.totalBram,
+                        parseInt(d.impl_dsp || 0, 10)
+                    ],
+                    backgroundColor: palette[i % palette.length]
+                }))
+            }, { scales: { y: { type: "logarithmic" } } });
+
+            renderChart("powerChart", "bar", {
+                labels,
+                datasets: [
+                    { label: "Static", data: processed.map(d => safeFloat(d.power_static_w)), backgroundColor: "#80b1d3" },
+                    { label: "Dynamic", data: processed.map(d => safeFloat(d.power_dynamic_w)), backgroundColor: "#ffffb3" }
+                ]
+            }, { scales: { x: { stacked: true }, y: { stacked: true } } });
+
+            renderChart("efficiencyChart", "scatter", {
+                datasets: processed.map((d, i) => ({
+                    label: labels[i],
+                    data: (d.pixelThr && d.pixelEff) ? [{ x: d.pixelThr, y: d.pixelEff }] : [],
+                    backgroundColor: palette[i % palette.length],
+                    pointRadius: 10
+                }))
+            }, {
+                scales: {
+                    x: { title: { display: true, text: "Pixel Throughput (pixels/s)" } },
+                    y: { title: { display: true, text: "Pixel Energy Efficiency (pixels/s/W)" } }
+                }
+            });
+
+            populateKPIs(processed);
+            populateGroupedTable(data);
+            renderModelCards(data);
+        }
+
+        window.onload = () => {
+            renderDashboard(initialData);
+        };
+    </script>
+</body>
+</html>

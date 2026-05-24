@@ -1,0 +1,22 @@
+# Base environment for hls4ml pipeline build stages.
+#
+# Usage:
+#   conda env create -f envs/environment-base.yml -n <ENV_NAME>
+#   conda activate <ENV_NAME>
+
+name: hls4ml-pipeline-base
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - "numpy<2"
+    - "h5py<3.12"
+    - pydigitalwavetools==1.1
+    - pyyaml
+    - "tensorflow==2.13.*"
+    - qkeras
+    - pyparsing
+    - "git+https://github.com/gflengas/hls4ml.git@fix-link-system-error-handling"

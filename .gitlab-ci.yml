@@ -1,0 +1,117 @@
+stages:
+  - check
+  - build
+
+variables:
+  GIT_SUBMODULE_STRATEGY: recursive
+  HLS4ML_RUNNER_TAG: "fpga-runner"
+  VITIS_IMAGE: "your-vitis-2023.2-image"
+  MODELS_DIR: "models"
+  TEST_MODELS: ""
+  DASHBOARD_PUBLIC_BASE_URL: ""
+  DASHBOARD_UPLOAD_BASE_URL: ""
+
+check:
+  stage: check
+  image: $VITIS_IMAGE
+  tags:
+    - ${HLS4ML_RUNNER_TAG}
+  variables:
+    BASE_ENV: "hls4ml-base"
+  script:
+    - mkdir -p ci_artifacts
+    - |
+      echo "=== [1/2] Validating models ==="
+      python3 - <<'PY'
+      import os
+      import sys
+      from pathlib import Path
+
+      models_dir = Path(os.environ.get("MODELS_DIR", "models"))
+      test_models = os.environ.get("TEST_MODELS", "").strip()
+      out_file = Path("ci_artifacts/models_to_test.txt")
+
+      if not models_dir.exists():
+          print(f"ERROR: models directory not found: {models_dir}")
+          sys.exit(1)
+
+      allowed_exts = {".h5", ".keras"}
+      selected = []
+
+      if test_models:
+          requested = [m.strip() for m in test_models.split(",") if m.strip()]
+          for model_name in requested:
+              candidate = models_dir / model_name
+              if not candidate.exists():
+                  print(f"ERROR: requested model not found: {candidate}")
+                  sys.exit(1)
+              if candidate.suffix.lower() not in allowed_exts:
+                  print(f"ERROR: requested model is not a Keras file (.h5/.keras): {candidate}")
+                  sys.exit(1)
+              selected.append(candidate.as_posix())
+      else:
+          for p in sorted(models_dir.iterdir()):
+              if p.is_file() and p.suffix.lower() in allowed_exts:
+                  selected.append(p.as_posix())
+
+      if not selected:
+          print(f"ERROR: no .h5/.keras models found in {models_dir}")
+          sys.exit(1)
+
+      out_file.write_text("\n".join(selected) + "\n", encoding="utf-8")
+      print("Models selected for this pipeline:")
+      for m in selected:
+          print(f" - {m}")
+      PY
+    - |
+      echo "=== [2/2] Creating base conda environment ==="
+      if [ -f ci_artifacts/base_env.tar.gz ]; then
+        echo "Base env restored from cache."
+      else
+        source /opt/conda/etc/profile.d/conda.sh
+        conda env create -f envs/environment-base.yml -n "$BASE_ENV"
+        conda activate "$BASE_ENV"
+        pip install --upgrade pip
+        conda deactivate
+        tar -czf ci_artifacts/base_env.tar.gz -C /opt/conda/envs "$BASE_ENV"
+      fi
+  cache:
+    key: hls4ml-check
+    paths:
+      - ci_artifacts/base_env.tar.gz
+    policy: pull-push
+  artifacts:
+    paths:
+      - ci_artifacts/models_to_test.txt
+      - ci_artifacts/base_env.tar.gz
+    when: always
+
+generate_model_pipeline:
+  stage: build
+  image: $VITIS_IMAGE
+  needs:
+    - check
+  tags:
+    - ${HLS4ML_RUNNER_TAG}
+  script:
+    - mkdir -p ci_artifacts
+    - python3 ci/generate_child_pipeline.py
+  artifacts:
+    when: always
+    paths:
+      - ci_artifacts/model-child-pipeline.yml
+
+run_model_pipeline:
+  stage: build
+  needs:
+    - generate_model_pipeline
+  trigger:
+    include:
+      - artifact: ci_artifacts/model-child-pipeline.yml
+        job: generate_model_pipeline
+    strategy: depend
+    forward:
+      yaml_variables: true
+      pipeline_variables: true
+  variables:
+    PARENT_PIPELINE_ID: $CI_PIPELINE_ID

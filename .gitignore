@@ -1,0 +1,7 @@
+hls4ml_project*/
+results/
+ci_artifacts/
+*.log
+*.pyc
+__pycache__/
+poster/
