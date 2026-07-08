@@ -102,6 +102,8 @@ generate_model_pipeline:
       - ci_artifacts/model-child-pipeline.yml
 
 run_model_pipeline:
+  inherit:
+    variables: false
   stage: build
   needs:
     - generate_model_pipeline
